@@ -5,6 +5,7 @@ using System.Linq;
 using System.Net;
 using System.Net.Security;
 using System.Net.Sockets;
+using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.RegularExpressions;
 using System.Threading.Tasks;
@@ -22,7 +23,7 @@ namespace FreeRedis.Internal
     {
         public static TempProxyRedisSocket CreateTempProxy(IRedisSocket rds, Action dispose)
         {
-            if (rds is TempProxyRedisSocket proxy) 
+            if (rds is TempProxyRedisSocket proxy)
                 return new TempProxyRedisSocket(proxy._owner, dispose);
             return new TempProxyRedisSocket(rds, dispose);
         }
@@ -244,14 +245,29 @@ namespace FreeRedis.Internal
                     (EndPoint)new IPEndPoint(tryip, _port) :
                     new DnsEndPoint(_ip, _port);
 
-                var localSocket = endpoint.AddressFamily == AddressFamily.InterNetworkV6 ? 
-                    new Socket(AddressFamily.InterNetworkV6, SocketType.Stream, ProtocolType.Tcp):
+                var localSocket = endpoint.AddressFamily == AddressFamily.InterNetworkV6 ?
+                    new Socket(AddressFamily.InterNetworkV6, SocketType.Stream, ProtocolType.Tcp) :
                     new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp);
 
                 try
                 {
-                    var asyncResult = localSocket.BeginConnect(endpoint, null, null);
-                    if (!asyncResult.AsyncWaitHandle.WaitOne(ConnectTimeout, true))
+                    localSocket.Blocking = false;
+                    localSocket.Connect(endpoint);
+                }
+                catch (SocketException ex)
+                {
+                    if (ex.SocketErrorCode != SocketError.WouldBlock)
+                    {
+                        ReleaseSocket(localSocket);
+                        throw;
+                    }
+                }
+
+                try
+                {
+                    //var asyncResult = localSocket.BeginConnect(endpoint, null, null);
+                    //if (!asyncResult.AsyncWaitHandle.WaitOne(ConnectTimeout, true))
+                    if (!localSocket.Poll((int)ConnectTimeout.TotalMilliseconds * 1000, SelectMode.SelectWrite))
                     {
                         var endpointString = endpoint.ToString();
                         if (endpointString != $"{_ip}:{_port}") endpointString = $"{_ip}:{_port} -> {endpointString}";
@@ -263,7 +279,8 @@ namespace FreeRedis.Internal
                         }
                         throw new TimeoutException($"Connect to redis-server({endpointString}) timeout{debugString}");
                     }
-                    localSocket.EndConnect(asyncResult);
+                    //localSocket.EndConnect(asyncResult);
+                    localSocket.Blocking = true;
                 }
                 catch
                 {
@@ -340,7 +357,7 @@ namespace FreeRedis.Internal
             host = host.Trim();
             var ipv6 = Regex.Match(host, @"^\[([^\]]+)\]\s*(:\s*(\d+))?$");
             if (ipv6.Success) //ipv6+port 格式： [fe80::b164:55b3:4b4f:7ce6%15]:6379
-                return new KeyValuePair<string, int>(ipv6.Groups[1].Value.Trim(), 
+                return new KeyValuePair<string, int>(ipv6.Groups[1].Value.Trim(),
                     int.TryParse(ipv6.Groups[3].Value, out var tryint) && tryint > 0 ? tryint : 6379);
 
             var spt = (host ?? "").Split(':');
